@@ -1,0 +1,1075 @@
+---
+title: "R Notebook"
+output: 
+  html_notebook:
+    toc: true
+    toc_float:
+        collapsed: false
+    theme: united
+---
+#About the data
+
+Sample Name | Group | Gender | YOB | Mutation |
+------------|-------|--------|-----|---------|
+2338 | control | M | 1982 | RYR1 c.7300G>A
+1325 | control | M | 1974 | RYR1 c.14545G>A
+2539 | control | F | 1968 | RYR1 c.1840C>T
+1806 | control | M | 1972 | RYR1 c.6617C>T
+963 | patient | F | 1982 | RYR1 c.14422-14423TT>AA
+1762 | patient | M | 1987 | RYR1 c.718N>T&c.2897N>T
+1834 | patient | M | 1977 | RYR1 c.13891TG>C
+433 | patient | F | 1973 | RYR1 c.14818G>C
+
+
+#Quality control
+##FastQC
+https://www.bioinformatics.babraham.ac.uk/projects/fastqc/
+
+All reports can be found in FastQC_reports folder.
+
+Interpret the report: http://www.bioinformatics.babraham.ac.uk/projects/fastqc/Help/3%20Analysis%20Modules/
+
+It comes to attention that the data failed on sequence duplication levels module. This is because FastQC assumes that the library is diverse, which is not valid for RNA-Seq libraries. It's common to observe high duplication levels. According to the developer of FastQC, the duplication levels plots actually indicate a good RNA-Seq library. See: http://proteo.me.uk/2013/09/a-new-way-to-look-at-duplication-in-fastqc-v0-11/
+
+Another issue raised in Kmer(nucleotide sequences of fixed k length) content module, some overrepresented sequences caused the Kmers to be highly enriched.
+
+##SortMeRNA 
+This step is optional.
+
+A tool for rRNA removel: https://github.com/biocore/sortmerna/blob/master/SortMeRNA-User-Manual-2.1.pdf
+
+Index the rRNA databases(~3mins):
+```{bash}
+indexdb_rna --ref ./rRNA_databases/silva-bac-16s-id90.fasta,./index/silva-bac-16s:\
+./rRNA_databases/silva-bac-23s-id98.fasta,./index/silva-bac-23s:\
+./rRNA_databases/silva-arc-16s-id95.fasta,./index/silva-arc-16s:\
+./rRNA_databases/silva-arc-23s-id98.fasta,./index/silva-arc-23s:\
+./rRNA_databases/silva-euk-18s-id95.fasta,./index/silva-euk-18s:\
+./rRNA_databases/silva-euk-28s-id98.fasta,./index/silva-euk-28s:\
+./rRNA_databases/rfam-5.8s-database-id98.fasta,./index/rfam-5.8s:\
+./rRNA_databases/rfam-5s-database-id98.fasta,./index/rfam-5s
+```
+
+Merge reads(~5mins):
+```{bash}
+./scripts/merge-paired-reads.sh ../S050/processed/433_S1_L008_R1_001.fastq ../S050/processed/433_S1_L008_R2_001.fastq ../sortmerna/433.fastq
+```
+
+Filter rRNA from reads:
+```{bash}
+sortmerna --ref \
+./rRNA_databases/silva-bac-16s-id90.fasta,./index/silva-bac-16s:\
+./rRNA_databases/silva-bac-23s-id98.fasta,./index/silva-bac-23s:\
+./rRNA_databases/silva-arc-16s-id95.fasta,./index/silva-arc-16s:\
+./rRNA_databases/silva-arc-23s-id98.fasta,./index/silva-arc-23s:\
+./rRNA_databases/silva-euk-18s-id95.fasta,./index/silva-euk-18s:\
+./rRNA_databases/silva-euk-28s-id98.fasta,./index/silva-euk-28s:\
+./rRNA_databases/rfam-5s-database-id98.fasta,./index/rfam-5s:\
+./rRNA_databases/rfam-5.8s-database-id98.fasta,./index/rfam-5.8s \
+--reads ../sortmerna/433.fastq \
+--fastx --aligned ../sortmerna/433_reads_rRNA --other ../sortmerna/433_reads_non_rRNA --log -a 8 --paired_in -v
+```
+
+Unmerged filtered reads:
+```{bash}
+./scripts/unmerge-paired-reads.sh ../sortmerna/433_reads_non_rRNA.fastq ../sortmerna/433_reads_non_rRNA_1.fastq  ../sortmerna/433_reads_non_rRNA_2.fastq
+```
+
+
+##sickle
+This step is optional.
+
+A trimming tool: https://github.com/ucdavis-bioinformatics/sickle
+```{bash}
+sickle pe -f ../S050/processed/433_S1_L008_R1_001.fastq -r ../S050/processed/433_S1_L008_R2_001.fastq -t sanger -o 433_trimmed_file1.fastq  -p 433_trimmed_file2.fastq -s 433_trimmed_singles.fastq
+```
+
+screen output:
+```{bash}
+PE forward file: ../S050/processed/433_S1_L008_R1_001.fastq
+PE reverse file: ../S050/processed/433_S1_L008_R2_001.fastq
+
+Total input FastQ records: 44787394 (22393697 pairs)
+
+FastQ paired records kept: 44311318 (22155659 pairs)
+FastQ single records kept: 235835 (from PE1: 228188, from PE2: 7647)
+FastQ paired records discarded: 4406 (2203 pairs)
+FastQ single records discarded: 235835 (from PE1: 7647, from PE2: 228188)
+```
+Comparing to the original data, the trimmed data doesn't show a better quality. So we abandoned this method.
+
+#Alignment
+
+##Pipeline 1
+
+###HISAT2
+https://ccb.jhu.edu/software/hisat2/manual.shtml
+
+####1.Indexing the reference genome
+
+```{bash}
+hisat2-build ../hg38/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa ./PRI
+```
+The command outputs 8 files: *PRI.1.ht2  PRI.2.ht2  PRI.3.ht2  PRI.4.ht2  PRI.5.ht2  PRI.6.ht2  PRI.7.ht2  PRI.8.ht2*
+
+####2.Aligning reads 
+First try with 433 file using a single quota(~45mins)
+```{bash}
+hisat2 -x ./PRI -1 ../S050/processed/433_S1_L008_R1_001.fastq -2 ../S050/processed/433_S1_L008_R2_001.fastq -S 433.sam --rna-strandness RF
+```
+Screen output:
+```{bash}
+22393697 reads; of these:
+  22393697 (100.00%) were paired; of these:
+    1694708 (7.57%) aligned concordantly 0 times
+    19436420 (86.79%) aligned concordantly exactly 1 time
+    1262569 (5.64%) aligned concordantly >1 times
+    ----
+    1694708 pairs aligned concordantly 0 times; of these:
+      695692 (41.05%) aligned discordantly 1 time
+    ----
+    999016 pairs aligned 0 times concordantly or discordantly; of these:
+      1998032 mates make up the pairs; of these:
+        1304348 (65.28%) aligned 0 times
+        604143 (30.24%) aligned exactly 1 time
+        89541 (4.48%) aligned >1 times
+97.09% overall alignment rate
+```
+File output: *433.sam*
+
+Second try with 963 file using 20 quotas(~6mins)
+```{bash}
+hisat2 -p 20 -x ./PRI -1 ../S050/processed/963_S2_L008_R1_001.fastq -2 ../S050/processed/963_S2_L008_R2_001.fastq -S 963.sam --rna-strandness RF
+```
+Screen output:
+```{bash}
+23082561 reads; of these:
+  23082561 (100.00%) were paired; of these:
+    1856948 (8.04%) aligned concordantly 0 times
+    20115736 (87.15%) aligned concordantly exactly 1 time
+    1109877 (4.81%) aligned concordantly >1 times
+    ----
+    1856948 pairs aligned concordantly 0 times; of these:
+      801355 (43.15%) aligned discordantly 1 time
+    ----
+    1055593 pairs aligned 0 times concordantly or discordantly; of these:
+      2111186 mates make up the pairs; of these:
+        1368042 (64.80%) aligned 0 times
+        650589 (30.82%) aligned exactly 1 time
+        92555 (4.38%) aligned >1 times
+97.04% overall alignment rate
+```
+File output: *963.sam*
+
+1325 file 
+```{bash}
+21238177 reads; of these:
+  21238177 (100.00%) were paired; of these:
+    2439728 (11.49%) aligned concordantly 0 times
+    17777487 (83.71%) aligned concordantly exactly 1 time
+    1020962 (4.81%) aligned concordantly >1 times
+    ----
+    2439728 pairs aligned concordantly 0 times; of these:
+      1090722 (44.71%) aligned discordantly 1 time
+    ----
+    1349006 pairs aligned 0 times concordantly or discordantly; of these:
+      2698012 mates make up the pairs; of these:
+        1911042 (70.83%) aligned 0 times
+        685274 (25.40%) aligned exactly 1 time
+        101696 (3.77%) aligned >1 times
+95.50% overall alignment rate
+```
+File output: *1325.sam*
+
+1762 file
+```{bash}
+26675014 reads; of these:
+  26675014 (100.00%) were paired; of these:
+    3579861 (13.42%) aligned concordantly 0 times
+    21557902 (80.82%) aligned concordantly exactly 1 time
+    1537251 (5.76%) aligned concordantly >1 times
+    ----
+    3579861 pairs aligned concordantly 0 times; of these:
+      1578888 (44.10%) aligned discordantly 1 time
+    ----
+    2000973 pairs aligned 0 times concordantly or discordantly; of these:
+      4001946 mates make up the pairs; of these:
+        2876526 (71.88%) aligned 0 times
+        968958 (24.21%) aligned exactly 1 time
+        156462 (3.91%) aligned >1 times
+94.61% overall alignment rate
+```
+File output: *1762.sam*
+
+1806 file
+```{bash}
+26855911 reads; of these:
+  26855911 (100.00%) were paired; of these:
+    2681823 (9.99%) aligned concordantly 0 times
+    22924217 (85.36%) aligned concordantly exactly 1 time
+    1249871 (4.65%) aligned concordantly >1 times
+    ----
+    2681823 pairs aligned concordantly 0 times; of these:
+      1215712 (45.33%) aligned discordantly 1 time
+    ----
+    1466111 pairs aligned 0 times concordantly or discordantly; of these:
+      2932222 mates make up the pairs; of these:
+        2015843 (68.75%) aligned 0 times
+        802650 (27.37%) aligned exactly 1 time
+        113729 (3.88%) aligned >1 times
+96.25% overall alignment rate
+```
+File output: *1806.sam*
+
+1834 file
+```{bash}
+23999083 reads; of these:
+  23999083 (100.00%) were paired; of these:
+    2359967 (9.83%) aligned concordantly 0 times
+    20595048 (85.82%) aligned concordantly exactly 1 time
+    1044068 (4.35%) aligned concordantly >1 times
+    ----
+    2359967 pairs aligned concordantly 0 times; of these:
+      1067482 (45.23%) aligned discordantly 1 time
+    ----
+    1292485 pairs aligned 0 times concordantly or discordantly; of these:
+      2584970 mates make up the pairs; of these:
+        1754419 (67.87%) aligned 0 times
+        734819 (28.43%) aligned exactly 1 time
+        95732 (3.70%) aligned >1 times
+96.34% overall alignment rate
+```
+File output: *1834.sam*
+
+2338 file
+```{bash}
+26361273 reads; of these:
+  26361273 (100.00%) were paired; of these:
+    3081323 (11.69%) aligned concordantly 0 times
+    22122914 (83.92%) aligned concordantly exactly 1 time
+    1157036 (4.39%) aligned concordantly >1 times
+    ----
+    3081323 pairs aligned concordantly 0 times; of these:
+      1383307 (44.89%) aligned discordantly 1 time
+    ----
+    1698016 pairs aligned 0 times concordantly or discordantly; of these:
+      3396032 mates make up the pairs; of these:
+        2410452 (70.98%) aligned 0 times
+        857368 (25.25%) aligned exactly 1 time
+        128212 (3.78%) aligned >1 times
+95.43% overall alignment rate
+```
+File output: *2338.sam*
+
+2539 file
+```{bash}
+25701263 reads; of these:
+  25701263 (100.00%) were paired; of these:
+    2394938 (9.32%) aligned concordantly 0 times
+    21957124 (85.43%) aligned concordantly exactly 1 time
+    1349201 (5.25%) aligned concordantly >1 times
+    ----
+    2394938 pairs aligned concordantly 0 times; of these:
+      1065463 (44.49%) aligned discordantly 1 time
+    ----
+    1329475 pairs aligned 0 times concordantly or discordantly; of these:
+      2658950 mates make up the pairs; of these:
+        1790623 (67.34%) aligned 0 times
+        753814 (28.35%) aligned exactly 1 time
+        114513 (4.31%) aligned >1 times
+96.52% overall alignment rate
+```
+File output: *2539.sam*
+
+
+###Samtools
+http://www.htslib.org/doc/samtools.html
+
+####Prerequisites:
+
+zlib-devel installed
+http://zlib.net/
+
+htslib and bcftools installed
+
+https://github.com/samtools/htslib
+
+https://github.com/samtools/bcftools
+
+####1.Convert the SAM file into a BAM file (~10mins)
+
+*e.g. 433.sam to 433.bam*
+```{bash}
+samtools view -bS 433.sam > 433.bam
+```
+
+To convert the rest of 8 files, launch a batch job on Rosalind and fill a cup of coffee.
+
+*a sample of bash script:*
+```{bash}
+#!/bin/sh
+#$ -pe smp 6
+#$ -cwd
+#$ -N convert_BAM
+#$ -j y
+#$ -l mem_free=28G
+#$ -l h_rt=02:00:00
+module load bioinformatics/samtools/1.5
+samtools view -bS ../hisat2/963.sam > 963.bam
+samtools view -bS ../hisat2/1325.sam > 1325.bam
+samtools view -bS ../hisat2/1762.sam > 1762.bam
+samtools view -bS ../hisat2/1806.sam > 1806.bam
+samtools view -bS ../hisat2/1834.sam > 1834.bam
+samtools view -bS ../hisat2/2338.sam > 2338.bam
+samtools view -bS ../hisat2/2539.sam > 2539.bam
+```
+
+
+####2.Sort BAM file (~10mins)
+
+*e.g. sort 433.bam by position*
+```{bash}
+samtools sort 433.bam -o 433.sorted.bam
+```
+
+Again, batch job
+```{bash}
+#!/bin/sh
+#$ -pe smp 6
+#$ -cwd
+#$ -N sort_BAM
+#$ -j y
+#$ -l mem_free=28G
+#$ -l h_rt=02:00:00
+module load bioinformatics/samtools/1.5
+samtools sort 963.bam -o 963.sorted.bam
+samtools sort 1325.bam -o 1325.sorted.bam
+samtools sort 1762.bam -o 1762.sorted.bam
+samtools sort 1806.bam -o 1806.sorted.bam
+samtools sort 1834.bam -o 1834.sorted.bam
+samtools sort 2338.bam -o 2338.sorted.bam
+samtools sort 2539.bam -o 2539.sorted.bam
+```
+
+
+```{bash}
+python infer_experiment.py -i ../../sharedscratch/samtools/1834.sorted.bam -r ../../sharedscratch/hg38/gtf/Homo_sapiens.GRCh38.89.bed
+```
+
+```{bash}
+This is PairEnd Data
+Fraction of reads failed to determine: 0.0559
+Fraction of reads explained by "1++,1--,2+-,2-+": 0.0121
+Fraction of reads explained by "1+-,1-+,2++,2--": 0.9320
+```
+
+
+###HTSeq
+http://htseq.readthedocs.io/en/release_0.9.1/
+
+####Generate reads count table (~55mins)
+
+```{bash}
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/433.sorted.bam Homo_sapiens.GRCh38.gtf > 433.count.txt
+```
+
+batch job for the rest files
+```{bash}
+#!/bin/sh
+#$ -pe smp 6
+#$ -cwd
+#$ -N read_count
+#$ -j y
+#$ -l mem_free=28G
+#$ -l h_rt=20:00:00
+module load general/python/2.7.10
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/433.sorted.bam ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 433.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/963.sorted.bam ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 963.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/1325.sorted.bam     ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 1325.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/1762.sorted.bam     ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 1762.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/1806.sorted.bam     ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 1806.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/1834.sorted.bam     ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 1834.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/2338.sorted.bam     ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 2338.count.txt
+htseq-count -f bam -r pos -s reverse -i gene_id -t exon ../samtools/2539.sorted.bam     ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf > 2539.count.txt
+```
+
+
+part of 433.count.txt (size:1.1M)
+```{bash}
+ENSG00000000003	35
+ENSG00000000005	8
+ENSG00000000419	100
+ENSG00000000457	107
+ENSG00000000460	38
+ENSG00000000938	25
+ENSG00000000971	640
+ENSG00000001036	114
+...
+```
+
+
+##Pipeline 2
+
+###STAR
+http://labshare.cshl.edu/shares/gingeraslab/www-data/dobin/STAR/STAR.posix/doc/STARmanual.pdf
+
+####1.Indexing the reference genome
+This task is memory demanding. We need 30-40GB to generate an index for the human genome. Therefore, we reserve more memory for running the bash script.
+```{bash}
+#!/bin/sh
+#$ -pe smp 20
+#$ -cwd
+#$ -N STAR_indexing
+#$ -j y
+#$ -l mem_free=50G
+#$ -l h_vmem=19G
+#$ -l h_rt=12:00:00
+module load bioinformatics/STAR/2.5.2a
+STAR --runThreadN 5 --runMode genomeGenerate --genomeDir ./genome  --genomeFastaFiles ../hg38/fasta/Homo_sapiens.GRCh38.dna.primary_assembly.fa --sjdbGTFfile ../hg38/gtf/Homo_sapiens.GRCh38.89.gtf --sjdbOverhang 124
+```
+
+####2.Mapping reads to the genome
+
+```{bash}
+#!/bin/sh
+#$ -pe smp 20
+#$ -cwd
+#$ -N STAR_mapping
+#$ -j y
+#$ -l mem_free=50G
+#$ -l h_vmem=19G
+#$ -l h_rt=12:00:00
+module load bioinformatics/STAR/2.5.2a
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/433_S1_L008_R1_001.fastq ../S050/processed/433_S1_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./433/433
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/963_S2_L008_R1_001.fastq ../S050/processed/963_S2_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./963/963
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/1325_S3_L008_R1_001.fastq ../S050/processed/1325_S3_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./1325/1325
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/1762_S8_L008_R1_001.fastq ../S050/processed/1762_S8_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./1762/1762
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/1806_S4_L008_R1_001.fastq ../S050/processed/1806_S4_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./1806/1806
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/1834_S5_L008_R1_001.fastq ../S050/processed/1834_S5_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./1834/1834
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/2338_S6_L008_R1_001.fastq ../S050/processed/2338_S6_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./2338/2338
+STAR --runThreadN 5 --genomeDir ./genome --readFilesIn ../S050/processed/2539_S7_L008_R1_001.fastq ../S050/processed/2539_S7_L008_R2_001.fastq --outSAMtype BAM SortedByCoordinate --quantMode GeneCounts --outFileNamePrefix ./2539/2539
+
+```
+File output: *Aligned.sortedByCoord.out.bam     ReadsPerGene.out.tab    SJ.out.tab*
+
+*ReadsPerGene.out.tab*
+```{bash}
+N_unmapped      1176314 1176314 1176314
+N_multimapping  1260483 1260483 1260483
+N_noFeature     6136326 18311385        6296366
+N_ambiguous     1929598 19634   449025
+ENSG00000223972 0       1       0
+ENSG00000227232 14      1       14
+ENSG00000278267 2       0       2
+ENSG00000243485 1       0       1
+ENSG00000284332 0       0       0
+ENSG00000237613 0       0       0
+ENSG00000268020 0       0       0
+ENSG00000240361 0       0       0
+...
+```
+
+*433Log.final.out*
+```{bash}
+                          Number of input reads |       22393697
+                      Average input read length |       250
+                                    UNIQUE READS:
+                   Uniquely mapped reads number |       19956900
+                        Uniquely mapped reads % |       89.12%
+                          Average mapped length |       248.03
+                       Number of splices: Total |       11326836
+            Number of splices: Annotated (sjdb) |       11220196
+                       Number of splices: GT/AG |       11234198
+                       Number of splices: GC/AG |       70557
+                       Number of splices: AT/AC |       3906
+               Number of splices: Non-canonical |       18175
+                      Mismatch rate per base, % |       0.17%
+                         Deletion rate per base |       0.01%
+                        Deletion average length |       1.62
+                        Insertion rate per base |       0.01%
+                       Insertion average length |       1.42
+                             MULTI-MAPPING READS:
+        Number of reads mapped to multiple loci |       1260483
+             % of reads mapped to multiple loci |       5.63%
+        Number of reads mapped to too many loci |       22306
+             % of reads mapped to too many loci |       0.10%
+                                  UNMAPPED READS:
+       % of reads unmapped: too many mismatches |       0.00%
+                 % of reads unmapped: too short |       5.10%
+                     % of reads unmapped: other |       0.05%
+                                  CHIMERIC READS:
+                       Number of chimeric reads |       0
+                            % of chimeric reads |       0.00%
+```
+
+*963Log.final.out*
+```{bash}
+
+                          Number of input reads |       23082561
+                      Average input read length |       250
+                                    UNIQUE READS:
+                   Uniquely mapped reads number |       20712230
+                        Uniquely mapped reads % |       89.73%
+                          Average mapped length |       247.83
+                       Number of splices: Total |       11970497
+            Number of splices: Annotated (sjdb) |       11866105
+                       Number of splices: GT/AG |       11874506
+                       Number of splices: GC/AG |       75094
+                       Number of splices: AT/AC |       3571
+               Number of splices: Non-canonical |       17326
+                      Mismatch rate per base, % |       0.16%
+                         Deletion rate per base |       0.01%
+                        Deletion average length |       1.59
+                        Insertion rate per base |       0.01%
+                       Insertion average length |       1.41
+                             MULTI-MAPPING READS:
+        Number of reads mapped to multiple loci |       1068116
+             % of reads mapped to multiple loci |       4.63%
+        Number of reads mapped to too many loci |       23954
+             % of reads mapped to too many loci |       0.10%
+                                  UNMAPPED READS:
+       % of reads unmapped: too many mismatches |       0.00%
+                 % of reads unmapped: too short |       5.49%
+                     % of reads unmapped: other |       0.05%
+                                  CHIMERIC READS:
+                       Number of chimeric reads |       0
+                            % of chimeric reads |       0.00%
+```
+
+# Differential Expression
+### DESeq2
+http://www.bioconductor.org/help/workflows/rnaseqGene/#differential-expression-analysis
+
+
+```{r}
+library(DESeq2)
+sample_table <- read.table("./read_counts/sample.txt",header = TRUE)
+dds <- DESeqDataSetFromHTSeqCount(sampleTable = sample_table ,directory = "./read_counts/HTSeq",design = ~ group)
+dds
+```
+
+Using STAR counts
+```{r}
+tem1 <- read.table("STAR/433ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem2 <- read.table("STAR/963ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem3 <- read.table("STAR/1325ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem4 <- read.table("STAR/1762ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem5 <- read.table("STAR/1806ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem6 <- read.table("STAR/1834ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem7 <- read.table("STAR/2338ReadsPerGene.out.tab",skip = 4,header = FALSE)
+tem8 <- read.table("STAR/2539ReadsPerGene.out.tab",skip = 4,header = FALSE)
+keeps <- c("V1","V4")
+temp <- merge(tem1[keeps],tem2[keeps],by = "V1")
+temp <- merge(temp,tem3[keeps],by = "V1")
+temp <- merge(temp,tem4[keeps],by = "V1")
+temp <- merge(temp,tem5[keeps],by = "V1")
+temp <- merge(temp,tem6[keeps],by = "V1")
+temp <- merge(temp,tem7[keeps],by = "V1")
+temp <- merge(temp,tem8[keeps],by = "V1")
+countData <- temp[,-1]
+rownames(countData) <- temp$V1
+colnames(countData) <- c("433","963","1325","1762","1806","1834","2338","2539")
+
+group <- factor(c("patient","patient","control","patient","control","patient","control","control"))
+dds_star <- DESeqDataSetFromMatrix(countData,DataFrame(group), ~ group)
+dds_star
+```
+
+
+Remove the rows that have no or nearly no information about the amount of gene expression.
+```{r}
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+```
+
+Correlation dendrogram of samples
+```{r}
+library(ape, warn.conflicts=FALSE)
+d <- cor(assay(rlog(dds)), method="spearman")
+hc <- hclust(dist(1-d))
+png("./clustering.png")
+plot.phylo(as.phylo(hc), type="p", edge.col="blue", edge.width=2, show.node.label=TRUE, no.margin=TRUE)
+dev.off()
+```
+
+
+STAR data
+```{r}
+dds_star <- dds_star[ rowSums(counts(dds_star)) > 1, ]
+nrow(dds_star)
+```
+
+Normalization: transforms the count data to the log2 scale
+by pipeline1
+```{r}
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 10)
+```
+
+Sample distances
+```{r}
+sampleDists <- dist(t(assay(rld)))
+sampleDists
+```
+
+STAR 
+```{r}
+rld_star <- rlog(dds_star, blind = FALSE)
+head(assay(rld_star), 10)
+```
+
+```{r}
+sampleDists_star <- dist(t(assay(rld_star)))
+sampleDists_star
+```
+
+
+
+Heatmap by sample distance
+```{r}
+library("pheatmap")
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste( rld$group, colnames(assay(rld)), sep = " - " )
+colnames(sampleDistMatrix) <-  NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Reds")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors,filename = "./heat1.png")
+```
+
+by sample poisson distances
+```{r}
+library("PoiClaClu")
+poisd <- PoissonDistance(t(counts(dds)))
+samplePoisDistMatrix <- as.matrix( poisd$dd )
+rownames(samplePoisDistMatrix) <- paste( rld$group, colnames(assay(rld)), sep = " - " )
+colnames(samplePoisDistMatrix) <- NULL 
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(samplePoisDistMatrix,
+         clustering_distance_rows = poisd$dd,
+         clustering_distance_cols = poisd$dd,
+         col = colors,filename = "./heat2.png")
+```
+
+STAR heatmaps
+```{r}
+sampleDistMatrix_star <- as.matrix( sampleDists_star )
+rownames(sampleDistMatrix_star) <- paste( rld_star$group, colnames(assay(rld_star)), sep = " - " )
+colnames(sampleDistMatrix_star) <-  NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Reds")) )(255)
+pheatmap(sampleDistMatrix_star,
+         clustering_distance_rows = sampleDists_star,
+         clustering_distance_cols = sampleDists_star,
+         col = colors)
+```
+
+
+
+```{r}
+#png("./pca.png")
+DESeq2::plotPCA(rld, intgroup = c("group"),ntop = 100)
+#dev.off()
+```
+
+Differential expression analysis based on the Negative Binomial 
+```{r}
+dds <- DESeq(dds)
+res <- results(dds,alpha = 0.05)
+res
+```
+
+```{r}
+summary(res)
+```
+
+
+
+```{r}
+table(res$padj < 0.05)
+```
+
+
+
+STAR data
+```{r}
+dds_star <- DESeq(dds_star)
+res_star <- results(dds_star)
+res_star
+```
+```{r}
+summary(res_star)
+```
+
+
+```{r}
+#png("./MA.png")
+DESeq2::plotMA(res, ylim = c(-5, 5))
+topGene <- rownames(res)[which.min(res$padj)]
+with(res[topGene, ], {
+  points(baseMean, log2FoldChange, col="dodgerblue", cex=2, lwd=2)
+  text(baseMean, log2FoldChange, topGene, pos=2, col="dodgerblue")
+})
+```
+
+
+Count plots
+```{r}
+topGene <- rownames(res)[which.min(res$padj)]
+
+plotCounts(dds, gene = topGene, intgroup=c("group"))
+```
+
+Gene clustering
+```{r}
+library("genefilter")
+topVarGenes <- head(order(rowVars(assay(rld)), decreasing = TRUE), 25)
+```
+
+```{r}
+mat  <- assay(rld)[ topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(rld)[,c("group")])
+row.names(anno) <- c(2238,1325,2539,1806,963,1762,1834,433)
+colnames(anno) <- c("group")
+pheatmap(mat, annotation_col = anno, labels_row = res[row.names(mat),"symbol"])
+#pheatmap(mat, annotation_col = anno, show_rownames=FALSE)#, filename = "hm200.png")
+#pheatmap(mat,kmeans_k = 5)
+```
+
+###Annotation
+
+```{r}
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+
+res$symbol = mapIds(org.Hs.eg.db,
+                     keys=row.names(res), 
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+res$entrez = mapIds(org.Hs.eg.db,
+                     keys=row.names(res), 
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+res$name =   mapIds(org.Hs.eg.db,
+                     keys=row.names(res), 
+                     column="GENENAME",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+```
+
+Top 10 gene sorted by p-value
+```{r}
+head(res[order(res$padj),], 15)
+```
+
+Top 10 gene sorted by log2FoldChange
+```{r}
+head(res[order(res$log2FoldChange),], 10)
+```
+
+```{r}
+gene_ranked <- res[order(res$log2FoldChange ),]
+gene_list <- gene_ranked[c("symbol","log2FoldChange")]
+gene_list <- gene_list[complete.cases(gene_list),]
+write.table(gene_list,file = "ranked_list.rnk",sep ="\t" ,quote = FALSE,row.names = FALSE,col.names = FALSE)
+```
+
+
+```{r}
+gene_ranked <- res[order(res$padj),]
+gene_list <- gene_ranked[c("symbol","name","padj")]
+gene_list <- gene_list[complete.cases(gene_list),]
+#write.table(subset(gene_list,padj<0.05),file = "ranked_list.txt",sep ="\t" ,quote = FALSE,row.names = FALSE)
+write.csv(subset(gene_list,padj<0.05),file ="ranked_list.csv",row.names = FALSE )
+```
+
+
+###Pathway analysis by gage
+http://www.gettinggeneticsdone.com/2015/12/tutorial-rna-seq-differential.html
+http://bioconductor.org/packages/release/bioc/html/gage.html
+
+```{r}
+library(pathview)
+library(gage)
+library(gageData)
+data(kegg.sets.hs)
+data(sigmet.idx.hs)
+#kegg.sets.hs = kegg.sets.hs[sigmet.idx.hs]
+```
+
+The gage() function requires a named vector of fold changes, where the names of the values are the Entrez gene IDs.
+```{r}
+foldchanges = res$log2FoldChange
+names(foldchanges) = res$entrez
+head(foldchanges)
+```
+
+```{r}
+# Get the results
+keggres = gage(foldchanges, gsets=kegg.sets.hs, same.dir=TRUE)
+
+# Look at both up (greater), down (less), and statatistics.
+lapply(keggres, head)
+```
+
+
+```{r}
+sigGeneSet(keggres,cutoff = 0.05)
+```
+
+
+process the results to pull out the top 5 upregulated pathways, then further process that just to get the IDs. We'll use these KEGG pathway IDs downstream for plotting.
+```{r}
+# Get the upregulated pathways
+keggrespathways = data.frame(id=rownames(keggres$greater), keggres$greater) 
+keggrespathways <- head(keggrespathways$id,5)
+keggrespathways
+```
+
+```{r}
+# Get the IDs.
+keggresids = substr(keggrespathways, start=1, stop=8)
+keggresids
+```
+
+
+
+Finally, the pathview() function in the pathview package makes the plots. Let's write a function so we can loop through and draw plots for the top 5 pathways we created above.
+```{r}
+# Define plotting function for applying later
+plot_pathway = function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa", new.signature=FALSE)
+
+# plot multiple pathways (plots saved to disk and returns a throwaway list object)
+tmp = sapply(keggresids, function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa"))
+```
+
+downregulated pathways
+```{r}
+keggrespathways_d = data.frame(id=rownames(keggres$less), keggres$less) 
+keggrespathways_d <- head(keggrespathways_d$id,5)
+keggrespathways_d
+```
+
+```{r}
+keggresids_d = substr(keggrespathways_d, start=1, stop=8)
+keggresids_d
+```
+
+```{r}
+plot_pathway = function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa", new.signature=FALSE)
+tmp = sapply(keggresids_d, function(pid) pathview(gene.data=foldchanges, pathway.id=pid, species="hsa"))
+```
+
+
+### edgeR
+https://bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf
+
+```{r}
+library(edgeR)
+files <- dir("./read_counts/HTSeq/",pattern="*\\.txt$")
+RG <- readDGE(files, path="./read_counts/HTSeq/",header=FALSE, labels = c("1325","1762","1806","1834","2338","2539","433","963"))
+
+group <- c("control","patient","control","patient","control","control","patient","patient")
+edgeDF <- DGEList(counts=RG, group=group, genes = rownames(RG))
+dim(edgeDF)
+```
+Filter out low expressed genes
+```{r}
+#keep <- rowSums(cpm(edgeDF)>0.5) >= 2
+keep <- rowSums(edgeDF$counts) > 1
+DGE_list <- edgeDF[keep, , keep.lib.sizes=FALSE]
+dim(DGE_list)
+```
+
+Annotation
+```{r}
+DGE_list$genes$Symbol <- mapIds(org.Hs.eg.db, rownames(DGE_list),keytype="ENSEMBL", column="SYMBOL")
+DGE_list$genes$Name <- mapIds(org.Hs.eg.db, rownames(DGE_list),keytype="ENSEMBL", column="GENENAME")
+```
+
+```{r}
+plotMDS(DGE_list)
+```
+
+Genewise Negative Binomial Generalized Linear Models
+```{r}
+library(statmod)
+design <- model.matrix(~0+group, data=DGE_list$samples)
+colnames(design) <- levels(DGE_list$samples$group)
+y <- estimateDisp(DGE_list, design, robust=TRUE)
+plotBCV(y)
+```
+
+```{r}
+fit <- glmQLFit(y, design, robust=TRUE)
+plotQLDisp(fit)
+```
+
+
+
+Classic approach
+
+pairwise comparisons between the groups
+```{r}
+et <- exactTest(y)
+topTags(et,30)
+```
+
+```{r}
+o <- order(et$table$PValue)
+cpm(y)[o[1:10],]
+```
+
+```{r}
+FDR <- p.adjust(et$table$PValue, method="BH")
+sum(FDR<0.05)
+```
+
+```{r}
+top_e <- topTags(et,sum(FDR<0.05))
+deseq_rank<- res[order(res$padj),]
+deseq_list <-subset(deseq_rank,padj<0.05)
+lista <- top_e$table$genes
+listb <- row.names(deseq_list)
+interlist <- lista[lista%in%listb]
+```
+
+
+```{r}
+write.csv(topTags(et,40),file ="et30.csv",row.names = FALSE )
+```
+
+
+###Gene Ontology with topGO
+
+```{r}
+library(topGO)
+#library(biomaRt)
+all_genes <- unlist(split(et$table$PValue, row.names(et$table)))
+GOdata <- new("topGOdata", ontology = "BP", allGenes = all_genes, geneSel = function(p) p < 1e-2, description = "Test", annot = annFUN.org, mapping="org.Hs.eg.db", ID="Ensembl")
+```
+
+enrichment tests
+
+```{r}
+resultFisher <- runTest(GOdata, algorithm = "classic", statistic = "fisher")
+resultKS <- runTest(GOdata, algorithm = "classic", statistic = "ks")
+GenTable(GOdata, classicFisher = resultFisher,KS = resultKS,orderBy = "classicFisher", topNodes = 20)
+```
+
+
+Box color represents the relative significance, ranging from dark red (most significant) to light yellow (least significant)
+```{r}
+library(Rgraphviz)
+printGraph(GOdata, resultFisher, firstSigNodes = 10, fn.prefix = "tGO", useInfo = "all", pdfSW = TRUE)
+showSigOfNodes(GOdata, score(resultFisher), firstSigNodes = 10, useInfo = 'all')
+```
+
+
+# Gene Set Enrichment Analysis
+## SeqGSEA
+https://www.bioconductor.org/packages/devel/bioc/vignettes/SeqGSEA/inst/doc/SeqGSEA.pdf
+
+Load files
+```{r}
+library(SeqGSEA)
+dat.dir = system.file("extdata", package="SeqGSEA", mustWork=TRUE)
+case.files <- dir("./read_counts/case/", pattern=NULL, full.names = TRUE)
+control.files <- dir("./read_counts/ctrl/", pattern=NULL, full.names = TRUE)
+geneset.file <- system.file("extdata", "gs_symb.txt", package="SeqGSEA", mustWork=TRUE)
+```
+
+```{r}
+# output file prefix
+output.prefix <- "SeqGSEA.test"
+# setup parallel backend
+library(doParallel)
+cl <- makeCluster(2) # specify 2 cores to be used in computing
+registerDoParallel(cl) # parallel backend registration
+# setup permutation times
+perm.times <- 1000
+```
+
+load exon read count data,  remove genes with low expression
+```{r}
+RCS <- loadExonCountData(case.files, control.files)
+RCS <- exonTestability(RCS, cutoff=5)
+```
+
+```{r}
+geneTestable <- geneTestability(RCS)
+RCS <- subsetByGenes(RCS, unique(geneID(RCS))[geneTestable])
+```
+
+get gene IDs, which will be used in initialization of gene set
+```{r}
+geneIDs <- unique(geneID(RCS))
+# calculate DS NB statistics
+RCS <- estiExonNBstat(RCS)
+```
+
+
+```{r}
+# get gene read counts
+geneCounts <- getGeneCount(RCS)
+# calculate DE NB statistics
+label <- label(RCS)
+DEG <-runDESeq(geneCounts, label)
+DEGres <- DENBStat4GSEA(DEG)
+# calculate DE NB statistics on the permutation data sets
+permuteMat <- genpermuteMat(RCS, times=perm.times)
+DEpermNBstat <- DENBStatPermut4GSEA(DEG, permuteMat) # permutation
+```
+
+```{r}
+# DE score normalization
+DEscore.normFac <- normFactor(DEpermNBstat)
+DEscore <- scoreNormalization(DEGres$NBstat, DEscore.normFac)
+DEscore.perm <- scoreNormalization(DEpermNBstat, DEscore.normFac)
+# score integration - DSscore can be null
+gene.score <- geneScore(DEscore, DEweight=1)
+gene.score.perm <- genePermuteScore(DEscore.perm, DEweight=1) # visilization of scores
+
+#plotGeneScore(DEscore, DEscore.perm, pdf=paste(output.prefix,".DEScore.pdf",sep=""), main="Expression")
+#plotGeneScore(gene.score, gene.score.perm,
+#pdf=paste(output.prefix,".GeneScore.pdf",sep=""))
+
+```
+
+```{r}
+plotGeneScore(DEscore, DEscore.perm, main="Expression")
+```
+
+```{r}
+plotGeneScore(gene.score, gene.score.perm)
+```
+
+
+```{r}
+# load gene set data
+geneIDs <- rownames(geneCounts)
+gene.set <- loadGenesets(geneset.file, geneIDs, geneID.type="ensembl",genesetsize.min = 5, genesetsize.max = 1000)
+# enrichment analysis
+gene.set <- GSEnrichAnalyze(gene.set, gene.score, gene.score.perm, weighted.type=1)
+# format enrichment analysis results
+GSEAres <- GSEAresultTable(gene.set, TRUE)
+
+# output results
+write.table(GSEAres, paste(output.prefix,".GSEA.result.txt",sep=""),quote=FALSE, sep="\t", row.names=FALSE)
+
+#plotES(gene.set, pdf=paste(output.prefix,".GSEA.ES.pdf",sep=""))
+#plotSig(gene.set, pdf=paste(output.prefix,".GSEA.FDR.pdf",sep=""))
+```
+
+```{r}
+plotES(gene.set)
+```
+
+```{r}
+plotSig(gene.set)
+```
+
